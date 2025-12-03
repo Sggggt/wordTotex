@@ -1,5 +1,5 @@
 """Word to LaTeX converter package."""
 
-from .converter import ConverterConfig, DocxToLatexConverter
+from .converter import ConversionResult, ConverterConfig, DocxToLatexConverter
 
-__all__ = ["DocxToLatexConverter", "ConverterConfig"]
+__all__ = ["DocxToLatexConverter", "ConverterConfig", "ConversionResult"]

@@ -7,6 +7,7 @@ from typing import Iterable, Iterator, List, Optional, Tuple, Union
 from docx import Document
 from docx.document import Document as DocumentType
 from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.oxml.ns import qn
 from docx.table import _Cell, Table
 from docx.text.paragraph import Paragraph
 from docx.text.run import Run
@@ -21,12 +22,30 @@ class ConverterConfig:
     table_border: bool = True
 
 
+@dataclass
+class ConversionResult:
+    latex: str
+    image_paths: List[Path]
+
+
 class DocxToLatexConverter:
     def __init__(self, config: Optional[ConverterConfig] = None) -> None:
         self.config = config or ConverterConfig()
+        self._image_dir: Optional[Path] = None
+        self._saved_images: List[Path] = []
+        self._tex_output_dir: Optional[Path] = None
+        self._image_counter: int = 1
 
-    def convert(self, docx_path: Union[str, Path]) -> str:
+    def convert(
+        self, docx_path: Union[str, Path], output_dir: Optional[Path] = None
+    ) -> ConversionResult:
+        docx_path = Path(docx_path)
         document = Document(docx_path)
+        self._tex_output_dir = Path(output_dir) if output_dir else docx_path.parent
+        self._image_dir = self._tex_output_dir / f"{docx_path.stem}_images"
+        self._saved_images = []
+        self._image_counter = 1
+
         lines: List[str] = []
         current_list: Optional[str] = None
 
@@ -53,7 +72,8 @@ class DocxToLatexConverter:
             lines.append(f"\\end{{{current_list}}}")
 
         body = "\n".join(lines).strip() + "\n"
-        return self._wrap_document(body) if self.config.include_preamble else body
+        latex = self._wrap_document(body) if self.config.include_preamble else body
+        return ConversionResult(latex=latex, image_paths=self._saved_images.copy())
 
     def _convert_paragraph(
         self, paragraph: Paragraph, list_type: Optional[str]
@@ -92,6 +112,8 @@ class DocxToLatexConverter:
     def _build_runs(self, paragraph: Paragraph) -> str:
         parts: List[str] = []
         for run in paragraph.runs:
+            image_snippets = self._extract_images(run)
+            parts.extend(image_snippets)
             content = self._escape_tex(run.text)
             if not content:
                 continue
@@ -249,6 +271,7 @@ class DocxToLatexConverter:
             r"\usepackage{array}",
             r"\usepackage{xcolor}",
             r"\usepackage{hyperref}",
+            r"\usepackage{graphicx}",
             r"\begin{document}",
         ]
         return "\n".join(preamble) + "\n\n" + body + "\n\\end{document}\n"
@@ -260,3 +283,49 @@ class DocxToLatexConverter:
                 yield Paragraph(child, parent)
             elif child.tag.endswith("}tbl"):
                 yield Table(child, parent)
+
+    def _extract_images(self, run: Run) -> List[str]:
+        """Save images embedded in a run and return LaTeX includegraphics commands."""
+        if self._tex_output_dir is None:
+            return []
+
+        snippets: List[str] = []
+        pictures = run.element.xpath(".//pic:pic")
+        for pic in pictures:
+            blips = pic.xpath(".//a:blip")
+            if not blips:
+                continue
+            embed = blips[0].get(qn("r:embed"))
+            if not embed:
+                continue
+
+            image_part = run.part.related_parts.get(embed)
+            if not image_part:
+                continue
+
+            ext = Path(str(image_part.partname)).suffix or ".png"
+            image_name = f"image_{self._image_counter}{ext}"
+            self._image_counter += 1
+            image_dir = self._ensure_image_dir()
+            image_path = image_dir / image_name
+            image_path.write_bytes(image_part.blob)
+            self._saved_images.append(image_path)
+
+            rel_path = self._relative_image_path(image_path)
+            snippets.append(f"\n\\includegraphics[width=\\linewidth]{{{rel_path}}}\n")
+
+        return snippets
+
+    def _ensure_image_dir(self) -> Path:
+        if self._image_dir is None:
+            raise ValueError("Image directory is not configured")
+        self._image_dir.mkdir(parents=True, exist_ok=True)
+        return self._image_dir
+
+    def _relative_image_path(self, image_path: Path) -> str:
+        base_dir = self._tex_output_dir or image_path.parent
+        try:
+            rel_path = image_path.relative_to(base_dir)
+        except ValueError:
+            rel_path = image_path
+        return rel_path.as_posix()
